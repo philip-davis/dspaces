@@ -52,6 +52,34 @@ void FC_GLOBAL(dspaces_put_local_f2c,
         dspaces_put_local(*client, name, *version, *size, *ndim, lb, ub, data);
 }
 
+void FC_GLOBAL(dspaces_sub_f2c,
+               DSPACES_SUB_F2C)(dspaces_client_t *client, const char *name,
+                                uint32_t *version, uint32_t *size,
+                                uint32_t *ndim, uint64_t *lb, uint64_t *ub,
+                                dspaces_sub_fn cb, void *arg,
+                                dspaces_sub_t *subh)
+{
+    *subh = dspaces_sub(*client, name, *version, *size, *ndim, lb, ub, cb, arg);
+}
+
+void FC_GLOBAL(dspaces_check_sub_f2c,
+               DSPACES_CHECK_SUB_F2C)(dspaces_client_t *client,
+                                      dspaces_sub_t *subh, uint32_t *wait,
+                                      uint64_t *result, int *ierr)
+{
+    int res;
+
+    *ierr = dspaces_check_sub(*client, *subh, *wait, &result);
+    *result = *res;
+}
+
+void FC_GLOBAL(dspaces_cancel_sub_f2c,
+               DSPACES_CANCEL_SUB_F2C)(dspaces_client_t *client,
+                                       dspaces_sub_t *subh, int *ierr)
+{
+    *ierr = dspaces_cancel_sub(*client, *subh);
+}
+
 #if defined(__cplusplus)
 }
 #endif

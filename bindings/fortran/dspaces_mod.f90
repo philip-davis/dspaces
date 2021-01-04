@@ -5,6 +5,10 @@ module dspaces
         type(c_ptr) :: client
     end type
 
+    ! uh-oh
+    type dspaces_req
+        type(
+
     interface dspaces_get
        module procedure dspaces_get_1d_i4
        module procedure dspaces_get_1d_i8
@@ -73,6 +77,9 @@ module dspaces
         module procedure dspaces_put_local_5d_r4
         module procedure dspaces_put_local_5d_r8
     end interface
+
+    abstract interface
+        function dspaces_sub_fn(client, 
 
 contains
     subroutine dspaces_init( rank, client, ierr)
