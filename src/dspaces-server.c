@@ -714,6 +714,7 @@ int dspaces_server_init(char *listen_addr_str, MPI_Comm comm,
     static int is_initialized = 0;
     hg_bool_t flag;
     hg_id_t id;
+    int ret;
     int num_handlers = DSPACES_DEFAULT_NUM_HANDLERS;
 
     if(is_initialized) {
