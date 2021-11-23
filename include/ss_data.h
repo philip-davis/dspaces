@@ -125,7 +125,6 @@ typedef struct {
     size_t gdim_size;
     char *raw_odsc;
     char *raw_gdim;
-
 } odsc_hdr_with_gdim;
 
 struct dht_sub_list_entry {

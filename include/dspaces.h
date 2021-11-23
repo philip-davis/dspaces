@@ -378,6 +378,29 @@ int dspaces_put_meta(dspaces_client_t client, const char *name, int version,
 int dspaces_get_meta(dspaces_client_t client, const char *name, int mode,
                      int current, int *version, void **data, unsigned int *len);
 
+/**
+ * @brief advise the servers on data storage
+ *
+ * Advise servers on storage disposition for a version of a variable. The
+ * disposition can be to promote the object (put it into DRAM if it is not
+ * already), demote the object (move the object out of memory if it is in
+ * memory) or delete the object from storage, regardless of location. This has
+ * no effect on data put into the servers after the dspaces_hint calls complete
+ * or for data written with put_local (unless that data has been drained to a
+ * storage server).
+ *
+ * The type of hint can be DS_PROMOTE, DS_DEMOTE, or DS_DELETE.
+ *
+ * Returns 0 on success (regardless of storage impact), non-zero on failure.
+ *
+ * @param[in] client: dspaces client
+ * @param[in] var_name: the variable name
+ * @param[in] ver: the variable version to be affected
+ * @param[in] type: the type of hint to issue
+ */
+int dspaces_hint(dspaces_client_t client, const char *var_name,
+                 unsigned int ver, ds_hint_t type);
+
 #if defined(__cplusplus)
 }
 #endif

@@ -64,6 +64,7 @@ struct dspaces_provider {
     hg_id_t kill_client_id;
     hg_id_t sub_id;
     hg_id_t notify_id;
+    hg_id_t hint_id;
     struct ds_gspace *dsg;
     char **server_address;
     char **node_names;
@@ -102,6 +103,7 @@ DECLARE_MARGO_RPC_HANDLER(odsc_internal_rpc)
 DECLARE_MARGO_RPC_HANDLER(ss_rpc)
 DECLARE_MARGO_RPC_HANDLER(kill_rpc)
 DECLARE_MARGO_RPC_HANDLER(sub_rpc)
+DECLARE_MARGO_RPC_HANDLER(hint_rpc)
 
 static void put_rpc(hg_handle_t h);
 static void put_local_rpc(hg_handle_t h);
@@ -114,8 +116,7 @@ static void odsc_internal_rpc(hg_handle_t h);
 static void ss_rpc(hg_handle_t h);
 static void kill_rpc(hg_handle_t h);
 static void sub_rpc(hg_handle_t h);
-// static void write_lock_rpc(hg_handle_t h);
-// static void read_lock_rpc(hg_handle_t h);
+static void hint_rpc(hg_handle_t h);
 
 /* Server configuration parameters */
 static struct {
@@ -951,6 +952,8 @@ int dspaces_server_init(char *listen_addr_str, MPI_Comm comm,
         DS_HG_REGISTER(hg, server->sub_id, odsc_gdim_t, void, sub_rpc);
         margo_registered_name(server->mid, "notify_rpc", &server->notify_id,
                               &flag);
+        margo_registered_name(server->mid, "hint_rpc", &server->hint_id, &flag);
+        DS_HG_REGISTER(hg, server->hint_id, odsc_gdim_t, void, hint_rpc);
     } else {
         server->put_id = MARGO_REGISTER(server->mid, "put_rpc", bulk_gdim_t,
                                         bulk_out_t, put_rpc);
@@ -1004,7 +1007,6 @@ int dspaces_server_init(char *listen_addr_str, MPI_Comm comm,
             MARGO_REGISTER(server->mid, "kill_client_rpc", int32_t, void, NULL);
         margo_registered_disable_response(server->mid, server->kill_client_id,
                                           HG_TRUE);
-
         server->sub_id =
             MARGO_REGISTER(server->mid, "sub_rpc", odsc_gdim_t, void, sub_rpc);
         margo_register_data(server->mid, server->sub_id, (void *)server, NULL);
@@ -1013,6 +1015,10 @@ int dspaces_server_init(char *listen_addr_str, MPI_Comm comm,
             MARGO_REGISTER(server->mid, "notify_rpc", odsc_list_t, void, NULL);
         margo_registered_disable_response(server->mid, server->notify_id,
                                           HG_TRUE);
+        server->hint_id =
+            MARGO_REGISTER(server->mid, "hint_rpc", odsc_gdim_t, void, hint_rpc);
+        margo_register_data(server->mid, server->hint_id, (void *)server, NULL);
+        margo_registered_disable_response(server->mid, server->hint_id, HG_TRUE);
     }
     int err = dsg_alloc(server, conf_file, comm);
     if(err) {
@@ -1674,7 +1680,9 @@ static void get_rpc(hg_handle_t handle)
 
     struct obj_data *od, *from_obj;
 
+    ABT_mutex_lock(server->ls_mutex);
     from_obj = ls_find(server->dsg->ls, &in_odsc);
+    ABT_mutex_unlock(server->ls_mutex);
 
     od = obj_data_alloc(&in_odsc);
     ssd_copy(od, from_obj);
@@ -1998,6 +2006,75 @@ static void sub_rpc(hg_handle_t handle)
     free(results);
 }
 DEFINE_MARGO_RPC_HANDLER(sub_rpc)
+
+static void take_hint(dspaces_provider_t server, obj_descriptor *odsc, ds_hint_t type)
+{
+    int num_odscs;
+    obj_descriptor **odsc_tab;
+    int i;
+
+    ABT_mutex_lock(server->ls_mutex);
+    //odsc_tab = ls_find_all(server->dsg->ls, odsc, &num_odscs);
+   
+    for(i = 0; i < num_odscs; i++) {
+    }
+    ABT_mutex_unlock(server->ls_mutex);
+
+}
+
+static void send_hint_rpc(dspaces_provider_t server, int target, int rank, odsc_gdim_t *in)
+{
+    hg_addr_t server_addr;
+    hg_handle_t h;
+    margo_request req;
+
+    in->param = rank;
+    margo_addr_lookup(server->mid, server->server_address[target],
+                      &server_addr);
+    margo_create(server->mid, server_addr, server->hint_id, &h);
+    margo_iforward(h, in, &req);
+    margo_addr_free(server->mid, server_addr);
+    margo_destroy(h);
+}
+
+static void hint_rpc(hg_handle_t handle)
+{
+    margo_instance_id mid = margo_hg_handle_get_instance(handle);
+    const struct hg_info *info = margo_get_info(handle);
+    dspaces_provider_t server = (dspaces_provider_t)margo_registered_data(mid, info->id);
+    int32_t src, rank, parent, child1, child2;
+    odsc_gdim_t in;
+    obj_descriptor *odsc;
+    ds_hint_t type;
+
+    margo_get_input(handle, &in);
+    src = in.param;
+
+    rank = server->dsg->rank;
+    parent = (rank - 1) / 2;
+    child1 = (rank * 2) + 1;
+    child2 = child1 + 1;
+
+    if((src == -1 || src > rank) && rank > 0) {
+        send_hint_rpc(server, parent, rank, &in);
+    }
+    if((child1 != src && child1 < server->dsg->size_sp)) {
+        send_hint_rpc(server, child1, rank, &in);
+    }
+    if((child2 != src && child2 < server->dsg->size_sp)) {
+        send_hint_rpc(server, child2, rank, &in);
+    }
+
+    odsc = (obj_descriptor *)in.odsc_gdim.raw_odsc;
+    type = *(ds_hint_t *)in.odsc_gdim.raw_gdim;
+
+    take_hint(server, odsc, type);
+
+    margo_free_input(handle, &src);
+    margo_destroy(handle);
+
+}
+DEFINE_MARGO_RPC_HANDLER(hint_rpc);
 
 void dspaces_server_fini(dspaces_provider_t server)
 {

@@ -80,6 +80,7 @@ struct dspaces_client {
     hg_id_t kill_client_id;
     hg_id_t sub_id;
     hg_id_t notify_id;
+    hg_id_t hint_id;
     struct dc_gspace *dcg;
     char **server_address;
     char **node_names;
@@ -498,6 +499,7 @@ static int dspaces_init_margo(dspaces_client_t client,
         DS_HG_REGISTER(hg, client->notify_id, odsc_list_t, void, notify_rpc);
         margo_registered_name(client->mid, "query_meta_rpc",
                               &client->query_meta_id, &flag);
+        margo_registered_name(client->mid, "hint_rpc", &client->hint_id, &flag);
     } else {
         client->put_id = MARGO_REGISTER(client->mid, "put_rpc", bulk_gdim_t,
                                         bulk_out_t, NULL);
@@ -545,6 +547,8 @@ static int dspaces_init_margo(dspaces_client_t client,
                             NULL);
         margo_registered_disable_response(client->mid, client->notify_id,
                                           HG_TRUE);
+        client->hint_id = MARGO_REGISTER(client->mid, "hint_rpc", odsc_gdim_t, void, NULL);
+        margo_registered_disable_response(client->mid, client->hint_id, HG_TRUE);
     }
 
     return (dspaces_SUCCESS);
@@ -1346,8 +1350,10 @@ static void fill_odsc(const char *var_name, unsigned int ver, int elem_size,
     memset(odsc->bb.lb.c, 0, sizeof(uint64_t) * BBOX_MAX_NDIM);
     memset(odsc->bb.ub.c, 0, sizeof(uint64_t) * BBOX_MAX_NDIM);
 
-    memcpy(odsc->bb.lb.c, lb, sizeof(uint64_t) * ndim);
-    memcpy(odsc->bb.ub.c, ub, sizeof(uint64_t) * ndim);
+    if(ndim > 0) {
+        memcpy(odsc->bb.lb.c, lb, sizeof(uint64_t) * ndim);
+        memcpy(odsc->bb.ub.c, ub, sizeof(uint64_t) * ndim);
+    }
 
     strncpy(odsc->name, var_name, sizeof(odsc->name) - 1);
     odsc->name[sizeof(odsc->name) - 1] = '\0';
@@ -2034,4 +2040,43 @@ void dspaces_kill(dspaces_client_t client)
 
     margo_addr_free(client->mid, server_addr);
     margo_destroy(h);
+}
+
+int dspaces_hint(dspaces_client_t client, const char *var_name,
+                 unsigned int ver, ds_hint_t type)
+{
+    obj_descriptor odsc;
+    odsc_gdim_t in;
+    hg_addr_t server_addr;
+    hg_handle_t h;
+    margo_request req;
+    hg_return_t hret;
+
+    fill_odsc(var_name, ver, 0, 0, NULL, NULL, &odsc);
+       
+    in.odsc_gdim.size = sizeof(odsc);
+    in.odsc_gdim.raw_odsc = (char *)&odsc;
+    in.param = -1;
+    // TODO: generalize the odsc_gdim_t data type, or diversify data types.
+    in.odsc_gdim.gdim_size = sizeof(type);
+    in.odsc_gdim.raw_gdim = (char *)&type;
+
+    get_server_address(client, &server_addr);
+    hret = margo_create(client->mid, server_addr, client->hint_id, &h);
+    if(hret != HG_SUCCESS) {
+        fprintf(stderr, "ERROR: %s: margo_create() failed with %d.\n", __func__, hret);
+        return(-1);
+    }
+    hret = margo_iforward(h, &in, &req);
+    if(hret != HG_SUCCESS) {
+        fprintf(stderr, "ERROR: %s: margo_forward() failed with %d.\n", __func__, hret);
+        margo_destroy(h);
+        return(-1);
+    }
+
+    margo_destroy(h);
+    margo_addr_free(client->mid, server_addr);
+
+    return(0);
+
 }

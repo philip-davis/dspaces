@@ -12,6 +12,12 @@
 extern "C" {
 #endif
 
+typedef enum {
+    DS_PROMOTE,
+    DS_DEMOTE,
+    DS_DELETE
+} ds_hint_t;
+
 #define dspaces_SUCCESS 0          /* Success */
 #define dspaces_ERR_ALLOCATION -1  /* Error allocating something */
 #define dspaces_ERR_INVALID_ARG -2 /* An argument is invalid */
