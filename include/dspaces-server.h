@@ -64,6 +64,34 @@ void dspaces_server_fini(dspaces_provider_t server);
 int dspaces_server_find_objs(dspaces_provider_t server, const char *var_name,
                              int version, struct dspaces_data_obj **objs);
 
+
+/**
+ * @brief Retrieves list of data objects for a given variable/version pair, and locks the
+ * data bin for version. This lock is not limiteed to just var_name, and will lock all versions
+ * that are identical to version mod the max_version set in the server configuration file.
+ *  Locking the bin will block alll read and write operations on that bin until the lock
+ *  is released.
+ *
+ * @param[in] server DataSpaces server handle
+ * @param[in] var_name Name of variable to query
+ * @param[in] version version for which to query
+ * @param[out] objs list data objects in local storage that match the query.
+ *
+ * @return Number of objs found. Negative numbers indicate failure.
+ */
+
+int dspaces_server_lock_objs(dspaces_provider_t server, const char *var_name, int version, struct dspaces_data_obj **objs);
+
+/**
+ * @brief Releases a lock of the bin for version.
+ *
+ * @param[in] server DataSpaces server handle
+ * @param[in] var_name Name of variable (ignored - can be NULL)
+ * @param[in] version Version for which the bin to release is calculated (mod max_versions)
+ * @param[in] List of data objects (ignored - can be NULL)
+ */
+void dspaces_server_release_lock(dspaces_provider_t server, const char *var_name, int version);
+
 /**
  * @brief Retrieves data from a local storage object
  *
@@ -76,6 +104,18 @@ int dspaces_server_find_objs(dspaces_provider_t server, const char *var_name,
  */
 int dspaces_server_get_objdata(dspaces_provider_t server,
                                struct dspaces_data_obj *obj, void *buffer);
+
+/**
+ * @brief Retrieves a pointer to object data stored in server memory. This does not acquire
+ *  a lock on the data, so if a lock on the data bin is not already held there is no guarantee
+ *  of data consistency
+ *
+ *  @param[in] server DataSpaces server handle
+ *  @param[in] obj Data object for which to retrieve the data
+ *
+ *  @return pointer to data in memory, NULL for failure
+ */
+void *dspaces_server_get_objdata_unsafe(dspaces_provider_t server, struct dspaces_data_obj *obj);
 
 #if defined(__cplusplus)
 }

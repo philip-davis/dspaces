@@ -101,6 +101,9 @@ typedef struct {
     ABT_cond *meta_cond;
     struct list_head *meta_subs;
 
+    ABT_mutex *obj_hash_mutex;
+    ABT_cond *obj_hash_cond;
+
     /* List of data objects. */
     struct list_head obj_hash[1];
 } ss_storage;
@@ -278,7 +281,7 @@ static inline hg_return_t hg_proc_odsc_hdr_with_gdim(hg_proc_t proc, void *arg)
     return HG_SUCCESS;
 }
 
-MERCURY_GEN_PROC(bulk_gdim_t, ((odsc_hdr_with_gdim)(odsc))((hg_bulk_t)(handle)))
+MERCURY_GEN_PROC(bulk_gdim_t, ((odsc_hdr_with_gdim)(odsc))((hg_bulk_t)(handle))((uint64_t)(offset)))
 MERCURY_GEN_PROC(bulk_in_t, ((odsc_hdr)(odsc))((hg_bulk_t)(handle)))
 MERCURY_GEN_PROC(bulk_out_t, ((int32_t)(ret)))
 MERCURY_GEN_PROC(put_meta_in_t, ((hg_string_t)(name))((int32_t)(length))(
@@ -364,6 +367,9 @@ void free_gdim_list(struct list_head *gdim_list);
 void set_global_dimension(struct list_head *gdim_list, const char *var_name,
                           const struct global_dimension *default_gdim,
                           struct global_dimension *gdim);
+
+void ls_lock_bin(ss_storage *ls, obj_descriptor *odsc);
+void ls_unlock_bin(ss_storage *ls, obj_descriptor *odsc);
 
 struct lock_data *get_lock(struct list_head *list, char *name);
 struct lock_data *create_lock(struct list_head *list, char *name);

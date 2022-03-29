@@ -121,16 +121,16 @@ static int couple_write_nd(dspaces_client_t ndph, unsigned int ts, int num_vars,
                                   data_tab[i]);
             } else {
                 dspaces_put_req_t ds_req;
-                ds_req = dspaces_iput(ndph, var_name, ts, elem_size, dims, lb,
+                ds_req = dspaces_iput_d(ndph, var_name, ts, elem_size, dims, lb,
                                       ub, data_tab[i], 1, 1, 0);
-                dspaces_check_put(ndph, ds_req, 1);
+                err = dspaces_check_put(ndph, ds_req, 1);
             }
         } else {
             err = dspaces_put_local(ndph, var_name, ts, elem_size, dims, lb, ub,
                                     data_tab[i]);
         }
         if(err != 0) {
-            fprintf(stderr, "dspaces_put returned error %d", err);
+            fprintf(stderr, "dspaces_put returned error %d\n", err);
             return err;
         }
     }

@@ -56,8 +56,9 @@ struct sub_list_node {
 };
 
 struct dspaces_put_req {
-    hg_handle_t handle;
-    margo_request req;
+    int nrpc;
+    hg_handle_t *handle;
+    margo_request *req;
     struct dspaces_put_req *next;
     bulk_gdim_t in;
     int finalized;
@@ -127,6 +128,69 @@ static hg_return_t get_server_address(dspaces_client_t client,
 {
     return (margo_addr_lookup(
         client->mid, client->server_address[client->my_server], server_addr));
+}
+
+static int map_to_split(uint64_t len, int cuts, uint64_t pos)
+{
+    int div = len / cuts;
+    int rem = len % cuts;
+
+    if(pos < rem * (div + 1)) {
+        return(pos / (div + 1));
+    } else {
+        return(rem + ((pos - ((div + 1) * rem)) / div)); 
+    }
+}
+
+static uint64_t map_from_split(uint64_t len, int cuts, int cut)
+{
+    int div = len / cuts;
+    int rem = len % cuts;
+
+    if(cut < rem) {
+        return(cut * (div + 1));
+    } else {
+        return(rem * (div + 1) + (cut - rem) * div);
+    }
+}
+
+static hg_return_t get_split_addresses(dspaces_client_t client, uint64_t len, uint64_t lb, uint64_t ub, int *size, uint64_t *offsets, uint64_t *counts, hg_addr_t **server_addr)
+{
+    int nserv = client->size_sp;
+    int lcut = map_to_split(len, nserv, lb); 
+    int ucut = map_to_split(len, nserv, ub);
+    uint64_t lpos, upos;
+    hg_return_t hret;
+    int i;
+
+    DEBUG_OUT("decomposing %" PRIu64 " positions into %i cuts for lb = %" PRIu64 " and ub = %" PRIu64 ". lcut = %i, ucut = %i\n", len, nserv, lb, ub, lcut, ucut);
+
+    *size = (ucut - lcut) + 1;
+    *server_addr = malloc(*size * sizeof(*server_addr));
+    if(*size < 1) {
+        fprintf(stderr, "WARNING: empty decomposition from %" PRIu64 " to %" PRIu64  ".\n");
+        return(-1);
+    }
+    
+    for(i = 0; i < *size; i++) {
+        lpos = map_from_split(len, nserv, lcut + i);
+        if(lpos < lb) {
+            lpos = lb;
+        }
+        upos = map_from_split(len, nserv, lcut + i + 1) - 1;
+        if(upos > ub) {
+            upos = ub;
+        }
+        offsets[i] = lpos;
+        counts[i] = (upos - lpos) + 1;
+        hret = margo_addr_lookup(client->mid, client->server_address[lcut + i], &(*server_addr)[i]);       
+        if(hret != HG_SUCCESS) {
+            fprintf(stderr, "ERROR looking up address of server %i (%d)\n", lcut + i, hret);
+            return(hret);
+        } 
+    }
+
+    return(hret);
 }
 
 static hg_return_t get_meta_server_address(dspaces_client_t client,
@@ -723,6 +787,7 @@ static int setup_put(dspaces_client_t client, const char *var_name,
     in->odsc.gdim_size = sizeof(struct global_dimension);
     in->odsc.raw_gdim = (char *)(&odsc_gdim);
     hg_size_t rdma_size = (elem_size)*bbox_volume(&odsc.bb);
+    in->offset = 0;
 
     DEBUG_OUT("sending object %s \n", obj_desc_sprint(&odsc));
     // int *a = NULL;
@@ -781,6 +846,7 @@ int dspaces_put(dspaces_client_t client, const char *var_name, unsigned int ver,
     in.odsc.raw_odsc = (char *)(&odsc);
     in.odsc.gdim_size = sizeof(struct global_dimension);
     in.odsc.raw_gdim = (char *)(&odsc_gdim);
+    in.offset = 0;
     hg_size_t rdma_size = (elem_size)*bbox_volume(&odsc.bb);
 
     DEBUG_OUT("sending object %s \n", obj_desc_sprint(&odsc));
@@ -830,22 +896,34 @@ static int finalize_req(struct dspaces_put_req *req)
     bulk_out_t out;
     int ret;
     hg_return_t hret;
+    int i;
 
-    hret = margo_get_output(req->handle, &out);
-    if(hret != HG_SUCCESS) {
-        fprintf(stderr, "ERROR: (%s): margo_get_output() failed\n", __func__);
-        margo_bulk_free(req->in.handle);
-        margo_destroy(req->handle);
-        return dspaces_ERR_MERCURY;
+    ret = 0;
+    for(i = 0; i < req->nrpc; i++) {
+        hret = margo_get_output(req->handle[i], &out);
+        if(hret != HG_SUCCESS) {
+          fprintf(stderr, "ERROR: (%s): margo_get_output() failed\n", __func__);
+          margo_bulk_free(req->in.handle);
+          margo_destroy(req->handle[i]);
+          return dspaces_ERR_MERCURY;
+        }
+        if(!ret && out.ret) {
+            ret = out.ret;
+        }
+        margo_free_output(req->handle[i], &out);
+        margo_destroy(req->handle[i]);     
     }
-    ret = out.ret;
-    margo_free_output(req->handle, &out);
+         
     margo_bulk_free(req->in.handle);
-    margo_destroy(req->handle);
 
     if(req->buffer) {
         free(req->buffer);
         req->buffer = NULL;
+    }
+
+    if(req->nrpc > 0) {
+        free(req->handle);
+        free(req->req);
     }
 
     req->finalized = 1;
@@ -854,11 +932,119 @@ static int finalize_req(struct dspaces_put_req *req)
     return ret;
 }
 
+struct dspaces_put_req *dspaces_iput_d(dspaces_client_t client, const char *var_name, unsigned int ver,
+                                        int elem_size, int ndim, uint64_t *lb,
+                                        uint64_t *ub, void *data, int alloc,
+                                         int check, int free_buf)
+{
+    struct dspaces_put_req *ds_req;
+    uint64_t offsets[client->size_sp];
+    uint64_t counts[client->size_sp];
+    int nserv;
+    hg_addr_t *server_addrs;  
+    const void *buffer;
+    hg_return_t hret;
+    int i, j;
+
+    ds_req = calloc(1, sizeof(*ds_req));
+    obj_descriptor odsc = {.version = ver,
+                           .owner = {0},
+                           .st = st,
+                           .flags = 0,
+                           .size = elem_size,
+                           .bb = {
+                               .num_dims = ndim,
+                           }};
+
+    memset(odsc.bb.lb.c, 0, sizeof(uint64_t) * BBOX_MAX_NDIM);
+    memset(odsc.bb.ub.c, 0, sizeof(uint64_t) * BBOX_MAX_NDIM);
+
+    memcpy(odsc.bb.lb.c, lb, sizeof(uint64_t) * ndim);
+    memcpy(odsc.bb.ub.c, ub, sizeof(uint64_t) * ndim);
+   
+    strncpy(odsc.name, var_name, sizeof(odsc.name) - 1);
+    odsc.name[sizeof(odsc.name) - 1] = '\0';
+
+    struct global_dimension odsc_gdim;
+    set_global_dimension(&(client->dcg->gdim_list), var_name,
+                         &(client->dcg->default_gdim), &odsc_gdim);
+
+    ds_req->in.odsc.size = sizeof(odsc);
+    ds_req->in.odsc.raw_odsc = (char *)(&odsc);
+    ds_req->in.odsc.gdim_size = sizeof(struct global_dimension);
+    ds_req->in.odsc.raw_gdim = (char *)(&odsc_gdim);
+    hg_size_t rdma_size = (elem_size)*bbox_volume(&odsc.bb);
+
+    if(alloc) {
+        ds_req->buffer = malloc(rdma_size);
+        memcpy(ds_req->buffer, data, rdma_size);
+        buffer = ds_req->buffer;
+    } else {
+        buffer = data;
+        if(free_buf) {
+            ds_req->buffer = data;
+        }
+    }
+
+    hret = margo_bulk_create(client->mid, 1, (void **)&buffer, &rdma_size,
+                             HG_BULK_READ_ONLY, &ds_req->in.handle);
+    if(hret != HG_SUCCESS) {
+        fprintf(stderr, "ERROR: (%s): margo_bulk_create() failed\n", __func__);
+        return dspaces_PUT_NULL;
+    }
+
+    hret = get_split_addresses(client, odsc_gdim.sizes.c[odsc_gdim.ndim-1], lb[ndim-1], ub[ndim-1], &nserv, offsets, counts, &server_addrs);
+    ds_req->handle = malloc(nserv * sizeof(*ds_req->handle));
+    ds_req->req = malloc(nserv * sizeof(*ds_req->req));
+    ds_req->nrpc = nserv;
+
+    DEBUG_OUT("app put %s\n", obj_desc_sprint(&odsc));
+
+    DEBUG_OUT("splitting into  %i objects\n", nserv);
+
+    for(i = 0; i < nserv; i++) {
+        odsc.bb.lb.c[ndim-1] = offsets[i];
+        odsc.bb.ub.c[ndim-1] = offsets[i] + counts[i] - 1;
+        DEBUG_OUT("sending object %s \n", obj_desc_sprint(&odsc));
+        hret = margo_create(client->mid, server_addrs[i], client->put_id, &ds_req->handle[i]);
+        if(hret != HG_SUCCESS) {
+            fprintf(stderr, "ERROR: (%s): margo_create() failed\n", __func__);
+            margo_bulk_free(ds_req->in.handle);
+            return dspaces_PUT_NULL;
+        }
+        ds_req->in.offset = elem_size;
+        for(j = 0; j < ndim - 1; j++) {
+            ds_req->in.offset *= (ub[j] - lb[j]) + 1;
+        }
+        ds_req->in.offset *= offsets[i] - lb[ndim-1];
+        hret = margo_iforward(ds_req->handle[i], &ds_req->in, &ds_req->req[i]);
+        if(hret != HG_SUCCESS) {
+            fprintf(stderr, "ERROR: (%s): margo_forward() failed\n", __func__);
+            margo_bulk_free(ds_req->in.handle);
+            margo_destroy(*ds_req->handle);
+            return dspaces_PUT_NULL;
+        }
+        margo_addr_free(client->mid, server_addrs[i]);
+    }
+
+    free(server_addrs);
+
+    ds_req->next = NULL;
+    if(client->put_reqs_end) {
+        client->put_reqs_end->next = ds_req;
+        client->put_reqs_end = ds_req;
+    } else {
+        client->put_reqs = client->put_reqs_end = ds_req;
+    }
+
+    return ds_req;
+}
+
 struct dspaces_put_req *dspaces_iput(dspaces_client_t client,
                                      const char *var_name, unsigned int ver,
                                      int elem_size, int ndim, uint64_t *lb,
                                      uint64_t *ub, void *data, int alloc,
-                                     int check, int free)
+                                     int check, int free_buf)
 {
     hg_addr_t server_addr;
     hg_return_t hret;
@@ -866,6 +1052,8 @@ struct dspaces_put_req *dspaces_iput(dspaces_client_t client,
     int ret = dspaces_SUCCESS;
     const void *buffer;
     int flag;
+    int should_finalize;
+    int i;
 
     if(check) {
         // Check for comleted iputs
@@ -875,8 +1063,15 @@ struct dspaces_put_req *dspaces_iput(dspaces_client_t client,
             ds_req = *ds_req_p;
             flag = 0;
             if(!ds_req->finalized) {
-                margo_test(ds_req->req, &flag);
-                if(flag) {
+                should_finalize = 1;
+                for(i = 0; i < ds_req->nrpc; i++) {
+                    margo_test(ds_req->req[i], &flag);
+                    if(!flag) {
+                        should_finalize = 0;
+                        break;
+                    }
+                }
+                if(should_finalize) {
                     finalize_req(ds_req);
                     if(!ds_req->next) {
                         client->put_reqs_end = ds_req_prev;
@@ -918,7 +1113,11 @@ struct dspaces_put_req *dspaces_iput(dspaces_client_t client,
     ds_req->in.odsc.raw_odsc = (char *)(&odsc);
     ds_req->in.odsc.gdim_size = sizeof(struct global_dimension);
     ds_req->in.odsc.raw_gdim = (char *)(&odsc_gdim);
+    ds_req->in.offset = 0;
     hg_size_t rdma_size = (elem_size)*bbox_volume(&odsc.bb);
+    ds_req->nrpc = 1;
+    ds_req->handle = malloc(sizeof(*ds_req->handle));
+    ds_req->req = malloc(sizeof(*ds_req->req));
 
     if(alloc) {
         ds_req->buffer = malloc(rdma_size);
@@ -926,7 +1125,7 @@ struct dspaces_put_req *dspaces_iput(dspaces_client_t client,
         buffer = ds_req->buffer;
     } else {
         buffer = data;
-        if(free) {
+        if(free_buf) {
             ds_req->buffer = data;
         }
     }
@@ -943,18 +1142,18 @@ struct dspaces_put_req *dspaces_iput(dspaces_client_t client,
     get_server_address(client, &server_addr);
 
     hret =
-        margo_create(client->mid, server_addr, client->put_id, &ds_req->handle);
+        margo_create(client->mid, server_addr, client->put_id, ds_req->handle);
     if(hret != HG_SUCCESS) {
         fprintf(stderr, "ERROR: (%s): margo_create() failed\n", __func__);
         margo_bulk_free(ds_req->in.handle);
         return dspaces_PUT_NULL;
     }
 
-    hret = margo_iforward(ds_req->handle, &ds_req->in, &ds_req->req);
+    hret = margo_iforward(*ds_req->handle, &ds_req->in, ds_req->req);
     if(hret != HG_SUCCESS) {
         fprintf(stderr, "ERROR: (%s): margo_forward() failed\n", __func__);
         margo_bulk_free(ds_req->in.handle);
-        margo_destroy(ds_req->handle);
+        margo_destroy(*ds_req->handle);
         return dspaces_PUT_NULL;
     }
 
@@ -978,6 +1177,8 @@ int dspaces_check_put(dspaces_client_t client, struct dspaces_put_req *req,
     struct dspaces_put_req **ds_req_p, *ds_req_prev;
     int ret;
     hg_return_t hret;
+    int should_finalize;
+    int i;
 
     if(req->finalized) {
         ret = req->ret;
@@ -986,31 +1187,42 @@ int dspaces_check_put(dspaces_client_t client, struct dspaces_put_req *req,
     }
 
     if(wait) {
-        hret = margo_wait(req->req);
-        if(hret == HG_SUCCESS) {
-            ds_req_prev = NULL;
-            ds_req_p = &client->put_reqs;
-            while(*ds_req_p && *ds_req_p != req) {
-                ds_req_prev = *ds_req_p;
-                ds_req_p = &((*ds_req_p)->next);
-            }
-            if(!ds_req_p) {
-                fprintf(stderr,
-                        "ERROR: put req finished, but was not saved.\n");
-                return (-1);
-            } else {
-                ret = finalize_req(req);
-                if(req->next == NULL) {
-                    client->put_reqs_end = ds_req_prev;
-                }
-                *ds_req_p = req->next;
-                free(req);
-                return ret;
+        for(i = 0; i < req->nrpc; i++) { 
+            hret = margo_wait(req->req[i]);
+            if(hret != HG_SUCCESS) {
+                fprintf(stderr, "ERROR: %s: margo_wait failed for req %i\n", __func__, i);
+                break;
             }
         }
+        ds_req_prev = NULL;
+        ds_req_p = &client->put_reqs;
+        while(*ds_req_p && *ds_req_p != req) {
+            ds_req_prev = *ds_req_p;
+            ds_req_p = &((*ds_req_p)->next);
+        }
+        if(!ds_req_p) {
+            fprintf(stderr,
+                        "ERROR: put req finished, but was not saved.\n");
+            return (-1);
+        } else {
+            ret = finalize_req(req);
+            if(req->next == NULL) {
+                client->put_reqs_end = ds_req_prev;
+            }
+            *ds_req_p = req->next;
+            free(req);
+            return ret;
+        }
     } else {
-        margo_test(req->req, &flag);
-        if(flag) {
+        should_finalize = 1;
+       for(i = 0; i < req->nrpc; i++) {
+            margo_test(req->req[i], &flag);
+            if(!flag) {
+                should_finalize = 0;
+                break;
+            }
+        }
+        if(should_finalize) {
             ds_req_prev = NULL;
             ds_req_p = &client->put_reqs;
             while(*ds_req_p && *ds_req_p != req) {

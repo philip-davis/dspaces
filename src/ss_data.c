@@ -1,5 +1,4 @@
 /*
-p
  * Copyright (c) 2009, NSF Cloud and Autonomic Computing Center, Rutgers
  * University All rights reserved.
  *
@@ -810,6 +809,8 @@ ss_storage *ls_alloc(int max_versions)
     ls->meta_cond = malloc(sizeof(*ls->meta_cond) * (max_versions + 1));
     ls->meta_mutex = malloc(sizeof(*ls->meta_mutex) * (max_versions + 1));
     ls->meta_subs = malloc(sizeof(struct list_head) * (max_versions + 1));
+    ls->obj_hash_mutex = malloc(sizeof(*ls->obj_hash_mutex) * max_versions);
+    ls->obj_hash_cond = malloc(sizeof(*ls->obj_hash_cond) * max_versions);
 
     for(i = 0; i <= max_versions; i++) {
         if(i < max_versions) {
@@ -819,6 +820,10 @@ ss_storage *ls_alloc(int max_versions)
         INIT_LIST_HEAD(&ls->meta_subs[i]);
         ABT_cond_create(&ls->meta_cond[i]);
         ABT_mutex_create(&ls->meta_mutex[i]);
+        if(i < max_versions) {
+            ABT_mutex_create(&ls->obj_hash_mutex[i]);
+            ABT_cond_create(&ls->obj_hash_cond[i]);
+        }
     }
     ls->size_hash = max_versions;
 
@@ -939,9 +944,7 @@ void ls_add_obj(ss_storage *ls, struct obj_data *od)
     struct list_head *bin;
     struct obj_data *od_existing;
 
-    // ABT_rwlock_create(&od->lock);
-    // ABT_rwlock_wrlock(&od->lock);
-
+    ls_lock_bin(ls, &od->obj_desc);
     od_existing = ls_find_no_version(ls, &od->obj_desc);
     if(od_existing) {
         od_existing->f_free = 1;
@@ -958,7 +961,8 @@ void ls_add_obj(ss_storage *ls, struct obj_data *od)
     /* NOTE: new object comes first in the list. */
     list_add(&od->obj_entry, bin);
     ls->num_obj++;
-    // ABT_rwlock_unlock(&od->lock);
+
+    ls_unlock_bin(ls, &od->obj_desc);
 }
 
 struct obj_data *ls_lookup(ss_storage *ls, char *name)
@@ -1077,6 +1081,28 @@ struct obj_data *ls_find_no_version(ss_storage *ls, obj_descriptor *odsc)
     }
 
     return NULL;
+}
+
+void ls_lock_bin(ss_storage *ls, obj_descriptor *odsc)
+{
+    int index;
+    int res;
+
+    index = odsc->version % ls->size_hash;
+    
+    res = ABT_mutex_trylock(ls->obj_hash_mutex[index]);
+    if(res != ABT_SUCCESS && res != ABT_ERR_MUTEX_LOCKED) {
+        fprintf(stderr, "lock for bin %i held elsewhere.(%i)\n", index, res);
+        ABT_mutex_lock(ls->obj_hash_mutex[index]);
+    }
+}
+
+void ls_unlock_bin(ss_storage *ls, obj_descriptor *odsc)
+{
+    int index;
+
+    index = odsc->version % ls->size_hash;
+    ABT_mutex_unlock(ls->obj_hash_mutex[index]);
 }
 
 /*
